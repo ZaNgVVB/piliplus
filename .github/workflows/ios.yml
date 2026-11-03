@@ -1,6 +1,9 @@
 name: Build for iOS
 
 on:
+  push:
+    branches:
+      - codex/ios-video-decoder-recovery
   workflow_call:
     inputs:
       tag:
@@ -33,6 +36,9 @@ jobs:
       - name: Apply Patch
         shell: pwsh
         run: lib/scripts/patch.ps1 iOS
+
+      - name: Test iOS video lifecycle
+        run: flutter test --no-pub test/plugin/ios_video_lifecycle_test.dart
 
       - name: Build iOS
         run: |

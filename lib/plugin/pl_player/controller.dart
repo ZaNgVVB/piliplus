@@ -1,4 +1,4 @@
-import 'dart:async' show StreamSubscription, Timer;
+import 'dart:async' show StreamSubscription, Timer, unawaited;
 import 'dart:convert' show ascii, utf8;
 import 'dart:io' show Platform;
 import 'dart:math' show max, min;
@@ -29,6 +29,7 @@ import 'package:PiliPlus/plugin/pl_player/models/play_status.dart';
 import 'package:PiliPlus/plugin/pl_player/models/video_fit_type.dart';
 import 'package:PiliPlus/plugin/pl_player/utils/danmaku_options.dart';
 import 'package:PiliPlus/plugin/pl_player/utils/fullscreen.dart';
+import 'package:PiliPlus/plugin/pl_player/utils/ios_video_lifecycle.dart';
 import 'package:PiliPlus/services/service_locator.dart';
 import 'package:PiliPlus/utils/accounts.dart';
 import 'package:PiliPlus/utils/android/android_helper.dart';
@@ -76,6 +77,7 @@ typedef PlayOwner = ({String tag, Type? type});
 class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   Player? _videoPlayerController;
   VideoController? _videoController;
+  IOSVideoLifecycle? _iosVideoLifecycle;
 
   static PlPlayerController? _instance;
 
@@ -602,6 +604,27 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
 
   bool visible = true;
 
+  void onIOSAppLifecycleState(AppLifecycleState state) {
+    final lifecycle = _iosVideoLifecycle;
+    if (lifecycle == null) return;
+    if (state == .resumed) {
+      unawaited(lifecycle.resume());
+    } else {
+      unawaited(
+        lifecycle.suspend(
+          pausePlayback: !continuePlayInBackground.value,
+          // 无音轨时不能关闭唯一的视频轨道，否则 mpv 会结束当前媒体。
+          releaseVideo:
+              hwdec != null &&
+              hwdec != 'no' &&
+              !onlyPlayAudio.value &&
+              _videoPlayerController?.state.track.audio.id != 'no',
+          keepVideo: IOSPipHelper.needsUpdate,
+        ),
+      );
+    }
+  }
+
   DeviceOrientation? _orientation;
   late final checkIsAutoRotate = Platform.isAndroid && mode != .gravity;
   StreamSubscription<OrientationParams>? _orientationListener;
@@ -882,6 +905,18 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
 
     player.setMediaHeader(userAgent: BrowserUa.pc, referer: HttpString.baseUrl);
 
+    if (Platform.isIOS && _playerCount > 0) {
+      _iosVideoLifecycle = IOSVideoLifecycle(
+        isPlaying: () => player.state.playing,
+        videoTrack: () => player.state.track.video.id,
+        setPlaying: (playing) => playing ? player.play() : player.pause(),
+        // 使用文件局部选项，异步切换期间换源也不会把新视频禁用。
+        setVideoTrack: (track) =>
+            player.command(['set', 'file-local-options/vid', track]),
+        onError: Utils.reportError,
+      );
+    }
+
     _startListeners(player);
 
     return player;
@@ -947,6 +982,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     }
 
     assert(!isLive || seekTo == null);
+    _iosVideoLifecycle?.reset();
     await player.open(
       Media(
         video,
@@ -964,6 +1000,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     if (_videoPlayerController case final ctr? when (ctr.current.isNotEmpty)) {
       var media = ctr.current.last;
       if (!isLive) media = media.copyWith(start: ctr.state.position);
+      _iosVideoLifecycle?.reset();
       return ctr.open(media, play: true);
     }
     return null;
@@ -1682,6 +1719,8 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     }
 
     _playerCount = 0;
+    _iosVideoLifecycle?.dispose();
+    _iosVideoLifecycle = null;
     if (removeSafeArea) {
       showSystemBar();
     }
